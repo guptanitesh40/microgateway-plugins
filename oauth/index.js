@@ -17,7 +17,8 @@ const apiKeyCache = sharedMemoryCache;
 const validTokenCache = sharedMemoryCache;
 
 var JWS = rs.jws.JWS;
-var requestLib = require('postman-request');
+const https = require('https');
+const http = require('http');
 var _ = require('lodash');
 
 const authHeaderRegex = /Bearer (.+)/;
@@ -50,7 +51,7 @@ module.exports.init = function(config, logger, stats) {
     authorizationHelper = new AuthorizationHelper(debug);
     oauthConfigObj = config;
 
-    var request = config.request ? requestLib.defaults(config.request) : requestLib;
+    // var request = config.request ? requestLib.defaults(config.request) : requestLib;
     var keys = config.jwk_keys ? JSON.parse(config.jwk_keys) : null;
 
     let failopenGraceInterval = 0;
@@ -176,6 +177,67 @@ module.exports.init = function(config, logger, stats) {
 
     }
 
+function nativeRequest(opts, cb) {
+    const urlStr = typeof opts === 'string' ? opts : opts.url;
+    const parsedUrl = url.parse(urlStr);
+    const client = parsedUrl.protocol === 'https:' ? https : http;
+
+    const options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port,
+        path: parsedUrl.path,
+        method: opts.method || 'GET',
+        headers: opts.headers || {}
+    };
+
+    if (opts.auth) {
+        const auth = Buffer.from(opts.auth.user + ':' + opts.auth.pass).toString('base64');
+        options.headers['Authorization'] = 'Basic ' + auth;
+    }
+
+    let requestBody = opts.body;
+    if (opts.json) {
+        options.headers['Content-Type'] = 'application/json';
+        requestBody = JSON.stringify(opts.json);
+    }
+
+    const agentOptions = {};
+    if (opts.cert) agentOptions.cert = opts.cert;
+    if (opts.key) agentOptions.key = opts.key;
+    if (opts.ca) agentOptions.ca = opts.ca;
+    if (opts.rejectUnauthorized !== undefined) agentOptions.rejectUnauthorized = opts.rejectUnauthorized;
+    if (opts.pfx) agentOptions.pfx = opts.pfx;
+
+    if (Object.keys(agentOptions).length > 0) {
+        options.agent = new client.Agent(agentOptions);
+    }
+
+    const req = client.request(options, (res) => {
+        let body = '';
+        res.on('data', (chunk) => body += chunk);
+        res.on('end', () => {
+             if (opts.json) {
+                 try {
+                     body = JSON.parse(body);
+                 } catch (e) {
+                     // ignore
+                 }
+             }
+             cb(null, res, body);
+        });
+    });
+
+    req.on('error', (err) => {
+        cb(err);
+    });
+
+    if (requestBody) {
+        req.write(requestBody);
+    }
+
+    req.end();
+}
+
     function requestApiKeyJWT(req, res, next, config, logger, stats, middleware, apiKey, oldToken) {
 
         if (!config.verify_api_key_url) return sendError(req, res, next, logger, stats, 'invalid_request', 'API Key Verification URL not configured');
@@ -222,7 +284,7 @@ module.exports.init = function(config, logger, stats) {
             }
         }
         //debug(api_key_options);
-        request(api_key_options, function(err, response, body) {
+        nativeRequest(api_key_options, function(err, response, body) {
             if ( !err && !response)  {
                 debug('empty response received from verify apikey call');
                 return sendError(req, res, next, logger, stats, 'internal_server_error', 'empty response received');

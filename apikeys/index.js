@@ -8,7 +8,8 @@ var path = require("path");
 const checkIfAuthorized = require('../lib/validateResourcePath');
 var cache = require('../emgCache');
 var JWS = rs.jws.JWS;
-var requestLib = require('postman-request');
+const https = require('https');
+const http = require('http');
 var _ = require("lodash");
 
 const AuthorizationHelper = require('../lib/AuthorizationHelper');
@@ -32,7 +33,6 @@ module.exports.init = function(config, logger, stats) {
     if (config === undefined || !config) return (undefined);
     authorizationHelper = new AuthorizationHelper(debug);
 
-    var request = config.request ? requestLib.defaults(config.request) : requestLib;
     var keys = config.jwk_keys ? JSON.parse(config.jwk_keys) : null;
 
     var middleware = function(req, res, next) {
@@ -97,6 +97,67 @@ module.exports.init = function(config, logger, stats) {
 
     }
 
+function nativeRequest(opts, cb) {
+    const urlStr = typeof opts === 'string' ? opts : opts.url;
+    const parsedUrl = url.parse(urlStr);
+    const client = parsedUrl.protocol === 'https:' ? https : http;
+
+    const options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port,
+        path: parsedUrl.path,
+        method: opts.method || 'GET',
+        headers: opts.headers || {}
+    };
+
+    if (opts.auth) {
+        const auth = Buffer.from(opts.auth.user + ':' + opts.auth.pass).toString('base64');
+        options.headers['Authorization'] = 'Basic ' + auth;
+    }
+
+    let requestBody = opts.body;
+    if (opts.json) {
+        options.headers['Content-Type'] = 'application/json';
+        requestBody = JSON.stringify(opts.json);
+    }
+
+    const agentOptions = {};
+    if (opts.cert) agentOptions.cert = opts.cert;
+    if (opts.key) agentOptions.key = opts.key;
+    if (opts.ca) agentOptions.ca = opts.ca;
+    if (opts.rejectUnauthorized !== undefined) agentOptions.rejectUnauthorized = opts.rejectUnauthorized;
+    if (opts.pfx) agentOptions.pfx = opts.pfx;
+
+    if (Object.keys(agentOptions).length > 0) {
+        options.agent = new client.Agent(agentOptions);
+    }
+
+    const req = client.request(options, (res) => {
+        let body = '';
+        res.on('data', (chunk) => body += chunk);
+        res.on('end', () => {
+             if (opts.json) {
+                 try {
+                     body = JSON.parse(body);
+                 } catch (e) {
+                     // ignore
+                 }
+             }
+             cb(null, res, body);
+        });
+    });
+
+    req.on('error', (err) => {
+        cb(err);
+    });
+
+    if (requestBody) {
+        req.write(requestBody);
+    }
+
+    req.end();
+}
+
     function requestApiKeyJWT(req, res, next, config, logger, stats, middleware, apiKey) {
 
         if (!config.verify_api_key_url) return sendError(req, res, next, logger, stats, "invalid_request", "API Key Verification URL not configured");
@@ -147,7 +208,7 @@ module.exports.init = function(config, logger, stats) {
             }
         }
         debug(api_key_options);
-        request(api_key_options, function(err, response, body) {
+        nativeRequest(api_key_options, function(err, response, body) {
             if (err) {
                 debug("verify apikey gateway timeout");
                 return sendError(req, res, next, logger, stats, "gateway_timeout", err.message);
